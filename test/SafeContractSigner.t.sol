@@ -113,6 +113,8 @@ contract SafeContractSignerTest is PRBTest, StdCheats {
     address internal daoSafe;
     address internal daoContractSigner;
     address internal aliceSafe;
+    address internal bobSafe;
+    address internal contractOnlySafe;
 
     string internal mnemonic;
 
@@ -134,6 +136,17 @@ contract SafeContractSignerTest is PRBTest, StdCheats {
         signers[0] = alice;
         aliceSafe = _deploySafe(signers, 1, 0);
 
+        // Deploy bob safe.
+        signers = new address[](1);
+        signers[0] = bob;
+        bobSafe = _deploySafe(signers, 1, 0);
+
+        // Deploy contract only safe.
+        signers = new address[](2);
+        signers[0] = bobSafe;
+        signers[1] = aliceSafe;
+        contractOnlySafe = _deploySafe(signers, 2, 0);
+
         // Deploy contract signer safe.
         signers = new address[](3);
         signers[0] = aliceSafe;
@@ -151,6 +164,12 @@ contract SafeContractSignerTest is PRBTest, StdCheats {
         vm.label(daoSafe, "daoSafe");
         vm.label(daoContractSigner, "daoContractSigner");
         vm.label(aliceSafe, "aliceSafe");
+        vm.label(bobSafe, "bobSafe");
+        vm.label(contractOnlySafe, "contractOnlySafe");
+        vm.label(alice, "alice");
+        vm.label(bob, "bob");
+        vm.label(carol, "carol");
+        vm.label(dave, "dave");
         vm.label(SAFE_SINGLETON, "SAFE_SINGLETON");
     }
 
@@ -233,6 +252,81 @@ contract SafeContractSignerTest is PRBTest, StdCheats {
 
     }
 
+    function test_SignFromContractsOnly() external {
+        deal(contractOnlySafe, 100 ether);
+
+        // Get hashes.
+        bytes memory txHashData = ISafe(contractOnlySafe)
+            .encodeTransactionData(
+                address(WETH9), // to
+                100 ether, // value
+                abi.encodeWithSelector(WETH9.deposit.selector), // data
+                Enum.Operation.Call, // operation
+                0, // safeTxGas
+                0, // baseGas
+                0, // gasPrice
+                address(0), // gasToken
+                address(0), // refundReceiver
+                ISafe(contractOnlySafe).nonce() // nonce
+            );
+
+        bytes32 txHash = keccak256(txHashData);
+
+        bytes32 aliceSignerHash = ISafe(aliceSafe)
+            .getMessageHashForSafe(ISafe(aliceSafe), txHashData);
+
+        bytes32 bobSignerHash = ISafe(bobSafe)
+            .getMessageHashForSafe(ISafe(bobSafe), txHashData);
+
+
+        // Sign.
+        bytes memory aliceSig = _signPacked(aliceKey, aliceSignerHash);
+        bytes memory bobSig = _signPacked(bobKey, bobSignerHash);
+
+        // Assemble signatures.
+        bytes memory contractSignerSig = aliceSafe < bobSafe ? 
+            bytes.concat(
+                    abi.encodePacked( // Contract sig
+                        abi.encode(aliceSafe), // r 32-bytes signature verifier
+                        uint256(130), // s 32-bytes data position
+                        uint8(0) // v 1-byte signature type
+                    ),
+                    abi.encodePacked( // Contract sig
+                        abi.encode(bobSafe), // r 32-bytes signature verifier
+                        uint256(130 + 65 + 32), // s 32-bytes data position
+                        uint8(0) // v 1-byte signature type
+                    ),                
+                bytes.concat(abi.encode(aliceSig.length), aliceSig, abi.encode(bobSig.length), bobSig)
+            ) : bytes.concat(
+                    abi.encodePacked( // Contract sig
+                        abi.encode(bobSafe), // r 32-bytes signature verifier
+                        uint256(130), // s 32-bytes data position
+                        uint8(0) // v 1-byte signature type
+                    ),
+                    abi.encodePacked( // Contract sig
+                        abi.encode(aliceSafe), // r 32-bytes signature verifier
+                        uint256(130 + 65 + 32), // s 32-bytes data position
+                        uint8(0) // v 1-byte signature type
+                    ),
+                bytes.concat(abi.encode(bobSig.length), bobSig, abi.encode(bobSig.length), aliceSig)
+            );
+
+        // Execute.
+        ISafe(contractOnlySafe).execTransaction(
+            address(WETH9), // to
+            100 ether, // value
+            abi.encodeWithSelector(WETH9.deposit.selector), // data
+            Enum.Operation.Call, // operation
+            0, // safeTxGas
+            0, // baseGas
+            0, // gasPrice
+            address(0), // gasToken
+            payable(address(0)), // refundReceiver
+            contractSignerSig // signatures
+        );
+
+    }
+
     function _signPacked(uint256 key, bytes32 hashToSign) internal pure returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(key, hashToSign);
         return abi.encodePacked(r, s, v);
@@ -262,6 +356,5 @@ contract SafeContractSignerTest is PRBTest, StdCheats {
     {
         return a < b ? bytes.concat(sigA, sigB) : bytes.concat(sigB, sigA);
     }
-
 
 }
